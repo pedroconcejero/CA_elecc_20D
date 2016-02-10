@@ -1,0 +1,264 @@
+---
+title: "Dimensiones de la política española: un Análisis de correspondencias (CA) de elecciones generales 2015"
+author: "pedro.concejerocerezo@gmail.com"
+date: "4 de enero de 2016"
+output: html_document
+---
+
+Debo esta entrada a colega Karel del [grupo R-madrid](http://madrid.r-es.org/), y que mantiene el maravilloso [blog café con datos](http://madrid.r-es.org/) una de cuyas entradas es precisamente [cómo obtener los resultados electorales provinciales](http://cafecondatos.es/2015/12/importar-datos-provinciales-de-las-elecciones-generales-de-2015-en-r-3/), que es lo que necesitaba para este análisis. Como todos en España sabemos, recientemente se han celebrado elecciones generales, y no ha sido sorpresa para nadie el fin del bipartidismo o al menos de las grandes mayorías parlamentarias que habíamos conocido históricamente. 
+
+Pues bien, lo que quiero hacer con este ejercicio es un análisis de correspondencias para intentar interpretar los resultados a partir de la tabla de diputados elegidos por provincia.
+
+```{r}
+library(FactoMineR) 
+library(data.table)
+library(reshape2)
+library(stringr)
+```
+
+Leemos los datos proporcionados tan amablemente por Karel (instrucciones detalladas para generar este archivo en su [blog café con datos](http://madrid.r-es.org/))
+
+```{r}
+setwd("C:/Users/pedroc/Desktop/MFA elecc 2015")
+
+```
+
+
+```{r}
+tabla_raw <- get(load("datos_provinciales_elecciones.RData"))
+head(tabla_raw)
+#str(tabla_raw)
+
+```
+
+Aunque parece un data frame no lo es, es un objeto lista y sobre él no funciona directamente el comando table, tal y como yo estoy acostumbrado a utilizarlo.
+
+Intentaremos tener un data frame habitual, eliminando de paso variables que no vamos a utilizar, como el nombre completo de los partidos. NOTA IMPORTANTE: para nuestro análisis utilizaremos el número de escaños obtenidos por los partidos (seats), no el número directo de votos. Si el lector está interesado en algún ejercicio con el número de votos podrá utilizar la variable VOTOS del dataframe.
+
+```{r}
+tabla_df <- data.frame(cbind(id = unlist(tabla_raw[[1]]),
+                             acronym = unlist(tabla_raw[[2]]),
+                             code = unlist(tabla_raw[[3]]),
+                             color = unlist(tabla_raw[[6]]),
+                             seats = unlist(tabla_raw[[7]]),
+                             votes = unlist(tabla_raw[[10]]),
+                             CODPROV = unlist(tabla_raw[[9]])))
+```
+
+Si observáis detenidamente los acrónimos de los partidos veréis caracteres raros: ya estamos con el sempiterno problema de la codificación de caracteres. Pero gracias a nuestro querido amigo [Jorge Ayuso](https://twitter.com/jayusor) tenemos una solución:
+
+```{r}
+
+iconv.data.frame <- function (df, ...)   
+{
+    df.names <- iconv(names(df), ...)
+    df.rownames <- iconv(rownames(df), ...)
+    names(df) <- df.names
+    rownames(df) <- df.rownames
+    df.list <- lapply(df, function(x) {
+        if (class(x) == "factor") {
+            x <- factor(iconv(as.character(x), ...))
+        }
+        else if (class(x) == "character") {
+            x <- iconv(x, ...)
+        }
+        else {
+            x
+        }
+    })
+    df.new <- do.call("data.frame", df.list)
+    return(df.new)
+}
+ 
+tabla_df <- iconv.data.frame(tabla_df,
+                             from = "UTF8",
+                             to = "latin1")
+
+
+```
+
+Tenemos todas las columnas como factores y eso no nos interesa, adapto de forma manual.
+
+```{r}
+tabla_df$acronym <- as.character(tabla_df$acronym)
+tabla_df$seats <- as.integer(as.character(tabla_df$seats))
+tabla_df$votes <- as.integer(as.character(tabla_df$votes))
+summary(tabla_df)
+
+```
+
+Veamos la lista de acrónimos y códigos de provincia, porque el objetivo será tener una tabla de n partidos x 50 provincias.
+
+```{r}
+partidos <- sort(unique(tabla_df$acronym))
+print(partidos)
+```
+
+¡Tenemos 92 nombres de partidos! Pero sólo una docena tienen representación parlamentaria. Pero primero deberemos sumar por provincias para eliminar aquellos que queden finalmente a 0.
+
+¿Pero qué más nos encontramos? Calidad del dato: un auténtico desastre. Tenemos "C's" y "C´s", "EB-AZ" y "EB - AZ", "PSE-EE" y "PSE-EE (PSOE)", "PSC" y "PSC-PSOE", "ERC-CATSI" y "ERC-CATSÍ"  así que a limpiar. Seguro que hay formas más elegantes de hacer esto pero 
+
+```{r}
+tabla_df$acronym[grep("C's", tabla_df$acronym)] <- "Cs"
+tabla_df$acronym[grep("C´s", tabla_df$acronym)] <- "Cs"
+tabla_df$acronym[grep("EB - AZ", tabla_df$acronym)] <- "EB-AZ"
+tabla_df$acronym[grep("PSE-EE", tabla_df$acronym)] <- "PSE-EE (PSOE)"
+tabla_df$acronym[grep("PSC", tabla_df$acronym)] <- "PSC-PSOE"
+tabla_df$acronym[grep("ERC-CATSÍ", tabla_df$acronym)] <- "ERC-CATSI"
+tabla_df$acronym[grep("EN COMÚ", tabla_df$acronym)] <- "PODEMOS-EN COMÚ"
+tabla_df$acronym[grep("UPN-PP", tabla_df$acronym)] <- "PP-UPN"
+
+tabla_df$acronym <- tolower(tabla_df$acronym)
+partidos <- sort(unique(tabla_df$acronym))
+print(partidos)
+
+```
+
+Aun así ¡esto es un follón! Sabemos que todas las federaciones autonómicas de PSOE (PSC-PSOE, PSdeG-PSOE, PSE-EE- PSOE)"se han unido en un solo grupo parlamentario. Luego tenemos una dispersión aun mayor con IU ("IU-CHA-UPeC", "IU-UpeC", "IU-UPeC", "IU-UPeC-IAS","IUC-UPeC", "IULV-CA, UPeC", "IULV-CA,UPeC"). Sabemos también que PODEMOS se ha presentado en ciertas autonomías en coalición con otros grupos ("podemos-ahal dugu", "podemos-ahora alto aragón en común", "podemos-compromís", "podemos-en marea-anova-eu", "podemos - compromis", y además esta otra: "en comú"). Hasta el PP se presenta con tres siglas adicionales ("UPN-PP", "pp-foro" y "pp-par"). Pues esto tendremos que arreglarlo de alguna manera. Insisto: seguro que hay formas más elegantes, con un diccionario por ejemplo, pero no tengo tiempo, a fin de cuentas esto tenía que venir con mejor calidad (!).
+
+```{r}
+
+tabla_df$acronym[grep(glob2rx("*psoe*"), tabla_df$acronym)] <- "psoe"
+tabla_df$acronym[grep(glob2rx("iu*"), tabla_df$acronym)] <- "iu"
+tabla_df$acronym[grep(glob2rx("podemos*"), tabla_df$acronym)] <- "podemos"
+tabla_df$acronym[grep(glob2rx("pp*"), tabla_df$acronym)] <- "pp"
+
+partidos <- sort(unique(tabla_df$acronym))
+print(partidos)
+
+```
+
+¡Por fin! Ahora sólo tenemos 67 partidos. En fin, no todos tienen representación parlamentaria (¿afortunadamente?), veamos cómo agrupar usando data tables y eliminando a los que no tienen ningún diputado electo. Recomiendo encarecidamente la [chuleta de data.table](https://s3.amazonaws.com/assets.datacamp.com/img/blog/data+table+cheat+sheet.pdf)
+
+```{r}
+
+tabla00 <- as.data.table(tabla_df)
+
+total_diputados <- tabla00[, 
+                           .(diputados = sum(seats)),
+                           by = acronym]
+
+print(total_diputados[order(diputados, decreasing = T),])
+```
+
+¡Por fin tenemos una agregación que se parece a la [publicada por el Ministerio de Interior](http://resultadosgenerales2015.interior.es/congreso/#/ES201512-CON-ES/ES)! Señores del susodicho, ¿tan difícil es proporcionar un dataset como el que estamos montando a partir de *sus propios datos*. 
+
+Una salvedad importante: por varios motivos de tipo analítico hemos juntado todas las candidaturas de podemos, es la única diferencia que el lector debiera observar entre la tabla publicada por el ministerio y esta tabla.
+
+Pues bien, ya podemos filtrar los partidos sin representación parlamentaria. Nos quedaremos con 10 (la tabla de ministerio tiene 13, porque segrega 3 candidaturas de podemos).
+
+```{r}
+
+filtrar <- total_diputados$acronym[total_diputados$diputados == 0]
+filtrar
+
+tabla01 <- tabla00[!(acronym %in% filtrar)]
+tabla01
+```
+
+Aunque esta tabla puede ser input para muchos análisis, nosotros utilizaremos el formato tabla pero en un data frame, como el que maneja FactoMineR en su viñeta, según se explica [aquí](http://factominer.free.fr/classical-methods/correspondence-analysis.html).
+
+```{r}
+
+tabla02 <- tabla01[,
+                    .(diputados = sum(seats)),
+                    by = .(CODPROV, acronym)]
+
+```
+
+Aquí tenemos la tabla en formato "long". La pasaremos a formato "wide", dejando las provincias como filas y los partidos como columnas para hacerla más legible.
+
+```{r}
+
+tabladef <- dcast(tabla02,
+                 formula = CODPROV ~ acronym)
+print(as.data.frame(tabladef))
+
+```
+
+Y sucede lo que sospechábamos: hay partidos que sólo se presentan en determinadas provincias y para el resto no figuran. Esta matriz está llena de NA's y tenemos que ver cómo los maneja nuestro algoritmo de Análisis de Correspondencias.
+
+```{r}
+
+#cares <- CA(tabladef[, 2:dim(tabladef)[2]]) 
+
+```
+
+(Comentado porque falla) Pues nada que hacer con los NA's ("Error in eigen(t(X) %*% X, symmetric = TRUE) : infinite or missing values in 'x'"). Así que no tenemos otro remedio que convertirlos en 0's.
+
+```{r}
+
+tabladef[is.na(tabladef)] <- 0
+
+cares <- CA(tabladef[, 2:dim(tabladef)[2]]) # no le gusta CODPROV como factor, pero no hace falta
+
+```
+
+Y nos sale un efecto autonómico (¿o se enfadarían mucho algunos de mis lectores si hablo de "nacionalidades históricas") de los partidos nacionalistas establecidos. Las provincias de Gerona y Lleida claramente se abonan a dos opciones nacionalistas (claramente separatistas por lo menos en los días en que escribo esto), pero las provincias de Tarragona y sobre todo Barcelona se separan claramente y se acercan a quién, a podemos. Algo parecido sucede en Euskadi (aquí no puedo hablar de separatismo, no al menos en los momentos actuales): las provincias de Vizcaya y Guipúzcoa se acercan a dos opciones nacionalistas, mientras que Álava se acerca a podemos.
+
+Pero para el resto no vemos nada. Vamos a quitar estos partidos autonómicos, nos quedamos por tanto con columnas 3 (ciudadanos o cs) y 8:11, a ver qué pasa
+
+```{r}
+
+cares <- CA(tabladef[, c(3, 8:11)]) 
+
+```
+
+Aquí tenemos otra anomalía: IU. Izquierda Unida a pesar de cosechar 1 millón de votos en la suma de todas las provincias sólo consigue diputados en la provincia de Madrid. 
+
+La dimensión 1, con el mayor porcentaje de "varianza explicada", 43%, la podríamos interpretar como una dimensión "ideológica": nos ordena los partidos de izquierda a derecha (orden inverso, ja!), con una posición quizás extraña de cs, más a la izquierda (derecha en el gráfico) que psoe. El caso extraño es IU por su separación con respecto a los demás partidos de ámbito nacional -con todas las salvedades de sus alianzas autonómicas-. La dimensión 2, con un peso menor (30%), podría parecer una dimensión territorial.
+
+Veamos qué pasa si prescindimos de IU.
+
+```{r}
+
+cares <- CA(tabladef[, c(3, 9:11)]) 
+
+```
+
+Cada partido de los de ámbito nacional con número importante de diputados electos se sitúa en un cuadrante del gráfico, y en torno a ellos tenemos las provincias (todavía sólo con su código). La dimensión 1 podríamos decir que tiene que ver con la ideología, pero ¿y la 2?
+
+Veamos si añadiendo nombres podemos mejorar la interpretación. Obtengo la tabla de nombres también de una excelente entrada de Karel en su [blog café con datos](http://cafecondatos.es/2015/12/normalizando-nombres-de-provincias-y-comunidades-autonomas/) en el que explica con exquisito detalle cómo obtener estas tablas, yo me quedo con las que propone del Instituto Geográfico Nacional. (No pongo el código que me permite obtener la tabla porque hay que descargarla de IGN y esto lo explica maravillosamente Karel). Eso sí, hago una pequeña adaptación porque hay nombres excesivamente largos (¿para qué querrán las 3 versiones de Castellón: Castelló/Castellón Castellón de la Plana/Castelló de la Plana?). Me cargo todo lo que está detrás del primer "/".
+
+```{r}
+
+load("provincias.rda")
+
+provincias
+
+provincias$NOMBRE_PROVINCIA <- word(provincias$NOMBRE_PROVINCIA, sep = "/")
+provincias$`COMUNIDAD/CIUDAD_AUTONOMA` <- word(provincias$`COMUNIDAD/CIUDAD_AUTONOMA`, sep = "/")
+
+provincias$`COMUNIDAD/CIUDAD_AUTONOMA` <- gsub("Comunidad Foral de", "", provincias$`COMUNIDAD/CIUDAD_AUTONOMA`)
+provincias$`COMUNIDAD/CIUDAD_AUTONOMA` <- gsub("Ciudad Autónoma de ", "", provincias$`COMUNIDAD/CIUDAD_AUTONOMA`)
+
+provincias
+
+```
+
+Me temo que para que salgan en el CA tenemos que poner las etiquetas como nombre de filas. Afortunadamente parece que el orden es el mismo y que podemos evitar tener que hacer un merge.
+
+```{r}
+
+rownames(tabladef) <- provincias$NOMBRE_PROVINCIA
+cares <- CA(tabladef[, c(3, 9:11)]) 
+
+```
+
+No se ve como yo quisiera pero es que no resulta directo utilizar otras librerías como por ejemplo directlabels, tendría que extraer las coordenadas de los puntos del objeto de salida del CA y ahora mismo no tengo tiempo.
+
+¿Alguna sorpresa? Pontevedra y A Coruña, por ejemplo. Salen situados parece que en el cuadrante de psoe, pero en realidad es que están equidistantes de psoe y podemos (ambos con 2 diputados por cada provincia) y pp sólo consigue 1 diputado más por cada provincia. Y si aceptamos el eje x como representativo de una ideología política, parece clara la posición tan izquierdista de Barcelona, además de Bizkaia y Gipuzkoa.
+
+Ahora vemos algunas cosas más: las provincias en el cuadrante del psoe son en gran mayoría del sur (Andalucía y Ciudad Real) y Extremadura. ¿Debiéramos interpretar que estas provincias son "más de derechas"? No, yo creo que no, lo que yo veo aquí son provincias con voto mayoritario a partidos "tradicionales". Así que me desdigo de lo que dije antes, y propongo la dimensión 1 como votante "tradicional" (o "establecido") frente a votante "emergente". 
+
+¿Y el eje y? Tiene que ver por un lado con el número de diputados que elige, esto tiene que ver con la población (número de votantes; aunque con infinidad de matices) de tal modo que cuanto más alejado del origen de coordenadas tenemos menor número de diputados electos. Guadalajara elige 3, Salamanca 4, Ceuta y Melilla sólo 1 cada una, y Badajoz 6.
+
+De tal modo que cuanto más cercano al origen en eje y más cantidad de diputados se eligen, y cuanto más alejados en eje x más "tradicional o emergente". 
+
+CONCLUSIONES
+
+Desde punto de vista técnico, ésta es una demostración de las interesantes capacidades de interpretación de tablas que proporciona Análisis de Correspondencias. De hecho, si le añadiéramos variables suplementarias como población, población en núcleo rural/urbano, variables de tipo económico, etc. podríamos encontrar muchas más relaciones interesantes, estoy seguro.
+
+Otra grandísima ventaja adicional es que te permite "mapear" variables cualitativas a coordenadas de un espacio. En cierto modo, supone "traducir" variables nominales a numéricas mediante la tabla de frecuencias que se obtiene con el cruce. Esto sería, en cierto modo, una adaptación de lo que se suele hacer con PCA. Sería cuestión de probar esta posibilidad para, por ejemplo, combinar estas variables con otras estrictamente numéricas para calcular un modelo predictivo.
+
+¿Y desde punto de vista sustantivo, mi opinión sobre resultados de elecciones 2015? Yo observo, creo que ahora sí refrendado con datos, una disociación importante entre unas provincias que votan a los partidos más tradicionales ("el bipartidismo") frente a otras que reparten más sus escaños con las formaciones emergentes. No me resisto a hablar de "tradicionalistas" (ya sean de a o de b) y "alternativos" (al menos del bipartidismo). Esta realidad política está aquí para quedarse y parece claro que ahora más que nunca habrá que tener en cuenta la gran diversidad que muestra este país en todos los sentidos. Y otra cosa más: este sistema electoral tan terriblemente no proporcional supone una distorsión no sé si históricamente interesante, pero que ahora mismo roza el ridículo. Un puñado de miles de electores nombran un diputado por Teruel, mientras que cientos de miles de electores en otras provincias ven diluidos sus votos si su partido no ocupa una de las primeras plazas por orden (no por número) de votos. Esto lo saben y lo aprovechan los partidos más establecidos, pero juega en contra con los emergentes. Pero ... ¿hasta cuándo? Fíjense en el resultado de Barcelona, por ejemplo.
